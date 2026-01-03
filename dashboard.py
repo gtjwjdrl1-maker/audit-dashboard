@@ -25,7 +25,7 @@ if not MY_API_KEY:
 
 DB_FILE = "audit_database.db"
 genai.configure(api_key=MY_API_KEY)
-target_model = 'gemini-2.0-flash' # 1,500회 무료 모델
+target_model = 'gemini-1.5-flash' # 1,500회 무료 모델
 
 try:
     tools = [{"google_search": {}}]
@@ -202,3 +202,4 @@ with tab2:
                     st.markdown(res)
                     save_ai_log(f"챗봇: {user_q}", res)
                 except Exception as e: st.error(f"오류: {e}")
+
