@@ -4,11 +4,11 @@ import sqlite3
 import os
 import google.generativeai as genai
 import plotly.express as px 
-from collections import Counter
 import datetime
+import base64
 
 # ==========================================
-# 1. 설정
+# 1. 기본 설정 및 보안
 # ==========================================
 try:
     MY_API_KEY = st.secrets["GOOGLE_API_KEY"]
@@ -18,99 +18,40 @@ except:
         load_dotenv()
         MY_API_KEY = os.getenv("GOOGLE_API_KEY")
     except:
-        MY_API_KEY = "여기에_아까_복사한_키를_붙여넣으세요"
+        MY_API_KEY = "" # 로컬 테스트 시 직접 입력
 
 if not MY_API_KEY:
-    st.error("API 키가 없습니다.")
+    st.error("API 키가 설정되지 않았습니다.")
     st.stop()
 
+# DB 파일 경로
 DB_FILE = "audit_database.db"
-genai.configure(api_key=MY_API_KEY)
 
-target_model = 'gemini-2.0-flash'
+# Gemini 설정
+genai.configure(api_key=MY_API_KEY)
+target_model = 'gemini-2.0-flash' 
 try:
     tools = [{"google_search": {}}]
     model = genai.GenerativeModel(target_model, tools=tools)
 except:
     model = genai.GenerativeModel(target_model)
 
-st.set_page_config(page_title="회계감리 분석 시스템", layout="wide")
+st.set_page_config(page_title="회계감리 AI 분석 시스템", layout="wide", page_icon="📊")
+
+# 소스코드 숨기기 (보안)
+hide_streamlit_style = """
+<style>
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header {visibility: hidden;}
+</style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 # ==========================================
-# 2. 데이터 로드 및 [고도화된 분류 매핑]
+# 2. 데이터 로드 및 로깅 함수
 # ==========================================
-@st.cache_data(ttl=0) 
-def load_data():
-    if not os.path.exists(DB_FILE): return pd.DataFrame()
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql("SELECT * FROM cases", conn)
-    conn.close()
-    
-    df.columns = [c.replace(' ', '') for c in df.columns]
-    if '결정연도' in df.columns:
-        df['결정연도'] = df['결정연도'].astype(str).str.replace(r'[^0-9]', '', regex=True)
-        df = df[df['결정연도'] != '']
-        df = df.sort_values('결정연도')
-
-    # [핵심 수정] 더 촘촘해진 상세 분류 로직
-    def map_detailed_group(row):
-        # 검색 대상 텍스트 확장 (관련계정 + 위반유형 + 요약)
-        t = (str(row.get('관련계정과목','')) + str(row.get('위반유형','')) + str(row.get('지적사항요약',''))).replace(" ", "")
-        
-        # 1. 최우선 적발 (부정/오류)
-        if any(x in t for x in ['횡령', '배임', '가공자산', '유용']): return "🚨 횡령·배임 및 자금유용"
-        if any(x in t for x in ['분식', '조작', '허위', '가공매출']): return "💣 고의적 회계분식/조작"
-        
-        # 2. 매출/채권 (Revenue Cycle)
-        if any(x in t for x in ['매출채권', '대손', '채권', '충당금', '회수']): return "💰 매출채권/대손충당금 (AR)"
-        if any(x in t for x in ['매출', '수익', '공사', '진행률', '인도', '총액', '순액']): return "📊 매출/수익인식 (Revenue)"
-        
-        # 3. 자산 (Asset)
-        if any(x in t for x in ['개발비', '무형', '영업권', '손상']): return "💡 무형자산/개발비 과대계상"
-        if any(x in t for x in ['재고', '평가손실', '저가법', '진부화', '수불']): return "📦 재고자산 평가/실재성"
-        if any(x in t for x in ['유형', '감가', '토지', '건물', '기계', '리스', '사용권']): return "🏗️ 유형자산/감가상각"
-        
-        # 4. 금융/투자 (Finance)
-        if any(x in t for x in ['파생', '전환사채', 'RCPS', '금융상품', '옵션', 'BW', 'CB']): return "📉 파생상품/복합금융상품"
-        if any(x in t for x in ['종속', '관계', '지분법', '주식', '투자주식', '펀드']): return "📈 투자주식/지분법 평가"
-        if any(x in t for x in ['대여금', '선급금', '가지급금', '현금', '예금']): return "💸 대여금/자금거래"
-        
-        # 5. 부채/자본 (Liabilities/Equity)
-        if any(x in t for x in ['차입금', '매입채무', '미지급', '부채', '충당부채', '보증']): return "📉 차입금/우발부채"
-        if any(x in t for x in ['자본', '잉여금', '주식보상', '스톡옵션', '신주', '자기주식']): return "💎 자본/주식보상비용"
-        if any(x in t for x in ['합병', '사업결합', '인수']): return "🤝 합병/사업결합 (M&A)"
-        
-        # 6. 세무/공시 (Tax/Disclosure)
-        if any(x in t for x in ['법인세', '이연']): return "⚖️ 법인세회계"
-        if any(x in t for x in ['주석', '담보', '약정']): return "📝 주석 미기재 (공시)"
-        if any(x in t for x in ['특수관계', '이해관계']): return "🔗 특수관계자 거래"
-        
-        return "🔍 기타 일반 회계처리"
-
-    def map_group(x): # 대분류용 (1페이지 차트용)
-        d = map_detailed_group({'관련계정과목':x, '위반유형':x, '지적사항요약':x}) # 약식 매핑
-        if '매출' in d or '수익' in d: return "💰 매출·채권"
-        if '재고' in d or '자산' in d: return "🏗️ 자산·재고"
-        if '금융' in d or '투자' in d or '파생' in d: return "🏦 금융·투자"
-        if '부채' in d or '자본' in d: return "⚖️ 부채·자본"
-        if '횡령' in d or '분식' in d: return "🚨 부정·오류"
-        else: return "📝 공시·기타"
-
-    df['상세분류'] = df.apply(map_detailed_group, axis=1)
-    df['표준그룹'] = df['관련계정과목'].apply(map_group)
-    return df
-
-def save_ai_log(prompt, response):
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        conn.execute("INSERT INTO ai_logs VALUES (?, ?, ?)", 
-                     (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), str(prompt), str(response)))
-        conn.commit(); conn.close()
-    except: pass
-
-# ==========================================
-# 3. 방문자 집계 및 데이터 로드
-# ==========================================
+# 방문자 집계
 def log_visit():
     if 'visited' not in st.session_state:
         try:
@@ -129,163 +70,233 @@ def get_visit_count():
         return cnt
     except: return 0
 
-def log_action(action_type, details):
+# AI 질문 로그 저장
+def save_ai_log(prompt, response):
     try:
         conn = sqlite3.connect(DB_FILE)
-        conn.execute('''CREATE TABLE IF NOT EXISTS user_actions (timestamp TEXT, action_type TEXT, details TEXT)''')
-        conn.execute("INSERT INTO user_actions VALUES (?, ?, ?)", 
-                     (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), action_type, details))
+        conn.execute('''CREATE TABLE IF NOT EXISTS ai_logs (timestamp TEXT, prompt TEXT, response TEXT)''')
+        conn.execute("INSERT INTO ai_logs VALUES (?, ?, ?)", 
+                     (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), str(prompt), str(response)))
         conn.commit(); conn.close()
     except: pass
 
-def get_top_rankings():
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        df_c = pd.read_sql("SELECT details as '사례명', COUNT(*) as '조회수' FROM user_actions WHERE action_type='VIEW_CASE' GROUP BY details ORDER BY 조회수 DESC LIMIT 5", conn)
-        df_k = pd.read_sql("SELECT prompt as '키워드', COUNT(*) as '질문수' FROM ai_logs GROUP BY prompt ORDER BY 질문수 DESC LIMIT 5", conn)
-        conn.close()
-        return df_c, df_k
-    except: return pd.DataFrame(), pd.DataFrame()
+# 데이터 로드 (캐싱)
+@st.cache_data(ttl=0) 
+def load_data():
+    if not os.path.exists(DB_FILE): return pd.DataFrame()
+    conn = sqlite3.connect(DB_FILE)
+    df = pd.read_sql("SELECT * FROM cases", conn)
+    conn.close()
+    
+    # 컬럼 공백 제거
+    df.columns = [c.replace(' ', '') for c in df.columns]
+    
+    # 연도 데이터 정제
+    if '결정연도' in df.columns:
+        df['결정연도'] = df['결정연도'].astype(str).str.replace(r'[^0-9]', '', regex=True)
+        df = df[df['결정연도'] != '']
+        df = df.sort_values('결정연도', ascending=False) # 최신순 정렬
+
+    # 상세 분류 매핑 (차트용)
+    def map_category(row):
+        t = (str(row.get('관련계정과목','')) + str(row.get('위반유형',''))).replace(" ", "")
+        if '매출' in t or '수익' in t: return "매출/수익인식"
+        if '재고' in t or '자산' in t: return "자산/재고자산"
+        if '파생' in t or '금융' in t or '주식' in t: return "금융/투자자산"
+        if '횡령' in t or '배임' in t: return "횡령/배임"
+        if '주석' in t: return "주석미기재"
+        return "기타 회계이슈"
+
+    df['이슈분류'] = df.apply(map_category, axis=1)
+    return df
 
 log_visit()
 df_all = load_data()
 
 # ==========================================
-# 4. 화면 구성
+# 3. 사이드바 (개발자 정보)
 # ==========================================
 with st.sidebar:
     st.markdown("## 👨‍💻 Developer")
     st.info("**서정기 (Jeremy)**\n\n중앙대학교 경영학부\n(KICPA)")
     st.metric("누적 방문자", f"{get_visit_count()} 명")
-    st.caption("© 2025 All rights reserved.")
+    st.caption("Last Updated: 2025.12")
+    st.markdown("---")
+    st.markdown("### 📌 사용 가이드")
+    st.markdown("""
+    **Tab 1:** 개별 감리지적사례 검색 및 **PDF 원본 열람**
+    **Tab 2:** 키워드 기반 **AI 통합 리포트** 작성 & 기준서 챗봇
+    """)
 
 st.title("📊 회계감리 지적사례 AI 분석 시스템")
 
-tab1, tab2 = st.tabs(["1️⃣ 종합 개요 (Trending)", "2️⃣ 심화 분석 (Deep Dive)"])
+# 탭 구성
+tab1, tab2 = st.tabs(["1️⃣ 개별 사례 검색 (PDF 뷰어)", "2️⃣ 테마별 통합 분석 & 기준서 챗봇"])
 
-# [탭 1]
+# ==============================================================================
+# [TAB 1] 개별 사례 검색 및 PDF 뷰어
+# ==============================================================================
 with tab1:
-    total = len(df_all)
-    top = df_all['상세분류'].mode()[0] if not df_all.empty else "-"
-    top_cases, top_keywords = get_top_rankings()
-    
-    col1, col2, col3 = st.columns(3)
-    col1.metric("총 분석 파일", f"{total}건")
-    col2.metric("최다 빈출 이슈", top) # 상세분류로 변경하여 더 구체적으로 보여줌
-    hot_kwd = top_keywords.iloc[0]['키워드'] if not top_keywords.empty else "-"
-    col3.metric("🔥 실시간 인기 질문", hot_kwd)
+    col_list, col_view = st.columns([1, 1.2]) # 화면 분할 (왼쪽:검색 / 오른쪽:뷰어)
 
-    st.markdown("---")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("🔥 많이 본 사례 Top 5")
-        if not top_cases.empty:
-            st.plotly_chart(px.bar(top_cases, x='조회수', y='사례명', orientation='h', text='조회수'), use_container_width=True)
-        else: st.info("데이터 집계 중...")
-    with c2:
-        st.subheader("🤖 자주 묻는 질문 Top 5")
-        if not top_keywords.empty:
-            st.plotly_chart(px.bar(top_keywords, x='질문수', y='키워드', orientation='h', text='질문수', color='질문수'), use_container_width=True)
-        else: st.info("데이터 집계 중...")
-
-    st.markdown("---")
-    st.subheader("🔎 전체 사례 검색")
-    cl, cd = st.columns([1, 1])
-    with cl:
-        kwd = st.text_input("키워드 검색", key="search")
+    # [왼쪽] 검색 및 목록
+    with col_list:
+        st.subheader("🔎 사례 검색")
+        kwd = st.text_input("키워드 입력 (예: 재고, 삼성, 횡령)", placeholder="검색어 입력...")
+        
+        # 필터링 로직
         if kwd:
             mask = df_all.apply(lambda x: x.astype(str).str.contains(kwd).any(), axis=1)
             filtered = df_all[mask]
-        else: filtered = df_all
-        st.caption(f"결과: {len(filtered)}건")
-        filtered['Label'] = filtered['회사명'] + " (" + filtered['결정연도'] + ") - " + filtered['상세분류']
-        sel = st.selectbox("사례 선택", filtered['Label'].unique())
-        if sel:
-            if 'last_viewed' not in st.session_state or st.session_state['last_viewed'] != sel:
-                log_action("VIEW_CASE", sel)
-                st.session_state['last_viewed'] = sel
-    with cd:
-        if sel:
-            row = filtered[filtered['Label'] == sel].iloc[0]
-            st.info(f"📌 {row['회사명']} ({row['결정연도']})")
-            st.write(f"**이슈:** {row['상세분류']} | **계정:** {row['관련계정과목']}")
-            with st.container(border=True): st.write("**⚠️ 지적:** " + row['지적사항요약'])
-            with st.container(border=True): st.success("**💡 유의:** " + row['감사인유의사항'])
-            with st.expander("원문 보기"): st.text(row.get('원본텍스트(일부)', '내용 없음'))
+        else:
+            filtered = df_all
 
-# [탭 2]
+        st.caption(f"검색 결과: {len(filtered)}건")
+        
+        # 선택 박스 (최신순)
+        filtered['Display'] = filtered['결정연도'] + " | " + filtered['회사명'] + " - " + filtered['지적사항요약'].str[:20] + "..."
+        sel_val = st.selectbox("열람할 사례를 선택하세요:", filtered['Display'].unique())
+    
+    # [오른쪽] 상세 정보 및 PDF 뷰어
+    with col_view:
+        if sel_val:
+            # 선택된 행 데이터 가져오기
+            row = filtered[filtered['Display'] == sel_val].iloc[0]
+            
+            # 1. 핵심 요약 카드
+            with st.container(border=True):
+                st.markdown(f"### 📌 {row['회사명']} ({row['결정연도']})")
+                st.write(f"**위반유형:** {row.get('위반유형','-')} | **관련계정:** {row.get('관련계정과목','-')}")
+                st.info(f"**⚠️ 지적사항:** {row['지적사항요약']}")
+                st.warning(f"**💡 감사인 유의사항:** {row['감사인유의사항']}")
+
+            # 2. PDF 원본 뷰어 (핵심!)
+            st.markdown("---")
+            st.subheader("📄 감리지적사례 원본(PDF)")
+            
+            # 파일 경로 (GitHub의 'pdfs' 폴더 안)
+            file_name = row.get('파일명', '')
+            pdf_path = os.path.join("pdfs", str(file_name))
+            
+            # 파일 존재 여부 확인 후 표시
+            if os.path.exists(pdf_path) and str(file_name).lower().endswith('.pdf'):
+                # (1) PDF 파일 읽기
+                with open(pdf_path, "rb") as f:
+                    base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+                
+                # (2) Iframe으로 화면에 표시
+                pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700" type="application/pdf"></iframe>'
+                st.markdown(pdf_display, unsafe_allow_html=True)
+            else:
+                st.error("⚠️ 원본 PDF 파일을 찾을 수 없습니다.")
+                st.caption(f"요청하신 파일명: {file_name}")
+                st.caption("※ 2025년 12월 최신 업데이트 데이터가 아직 서버에 반영되지 않았을 수 있습니다.")
+
+# ==============================================================================
+# [TAB 2] 키워드 기반 통합 분석 & 기준서 챗봇
+# ==============================================================================
 with tab2:
-    cm, cs = st.columns([7, 3])
-    with cm:
-        st.markdown("### 🤖 위반 유형별 심층 리포트")
-        cats = sorted(df_all['상세분류'].unique())
-        target = st.selectbox("분석할 핵심 이슈(Issue) 선택", cats)
-        sub = df_all[df_all['상세분류'] == target]
-        
-        st.success(f"👉 **'{target}'** 관련 사례: {len(sub)}건")
-        
-        if not sub.empty:
-            c1, c2 = st.columns(2)
-            with c1:
-                trend = sub['결정연도'].value_counts().sort_index().reset_index()
-                trend.columns = ['연도','건수']
-                st.plotly_chart(px.line(trend, x='연도', y='건수', title="연도별 추이"), use_container_width=True)
-            with c2:
-                if '위반유형' in sub.columns:
-                    t_cnt = sub['위반유형'].value_counts().head(5).reset_index()
-                    t_cnt.columns = ['유형','건수']
-                    st.plotly_chart(px.pie(t_cnt, values='건수', names='유형', hole=0.4, title="주요 위반유형"), use_container_width=True)
+    col_analysis, col_bot = st.columns([1.5, 1])
 
-        if st.button("🚀 리포트 생성"):
-            with st.spinner("분석 중..."):
+    # [왼쪽] 키워드 통합 분석 리포트
+    with col_analysis:
+        st.subheader("🤖 키워드 기반 AI 심층 리포트")
+        st.markdown("특정 **산업(건설, 제약)**이나 **이슈(무형자산, 특수관계자)**를 입력하면, 관련 사례를 모두 모아 분석합니다.")
+        
+        target_kwd = st.text_input("분석 주제 입력", placeholder="예: 건설업, 바이오, 지주사, 파생상품...")
+        
+        if target_kwd:
+            # 키워드 포함 사례 추출
+            mask = df_all.apply(lambda x: x.astype(str).str.contains(target_kwd).any(), axis=1)
+            target_df = df_all[mask]
+            
+            if not target_df.empty:
+                st.success(f"👉 **'{target_kwd}'** 관련 사례 총 **{len(target_df)}건**을 발견했습니다.")
+                
+                # 시각화 (연도별 추이)
+                trend = target_df['결정연도'].value_counts().sort_index().reset_index()
+                trend.columns = ['연도', '건수']
+                st.plotly_chart(px.line(trend, x='연도', y='건수', title=f"'{target_kwd}' 관련 지적사례 발생 추이"), use_container_width=True)
+                
+                # AI 리포트 생성 버튼
+                if st.button("🚀 AI 종합 리포트 생성하기"):
+                    with st.spinner("사례들을 종합하여 분석 보고서를 작성 중입니다..."):
+                        try:
+                            # 프롬프트에 넣을 사례 텍스트 생성 (최대 20개)
+                            cases_summary = ""
+                            for i, r in target_df.head(20).iterrows():
+                                cases_summary += f"- [{r['결정연도']}] {r['회사명']} ({r['관련계정과목']}): {r['지적사항요약']}\n"
+                            
+                            prompt = f"""
+                            당신은 회계법인의 품질관리실(Quality Control) 파트너입니다.
+                            아래 제공된 **'{target_kwd}'** 관련 과거 감리지적사례들을 종합 분석하여 주니어 회계사들을 위한 교육용 리포트를 작성하세요.
+
+                            [분석 대상 사례 목록]
+                            {cases_summary}
+
+                            [리포트 목차 및 요구사항]
+                            1. **Risk Overview**: 해당 이슈({target_kwd})가 회계감사에서 왜 위험한지, 어떤 특징이 있는지 요약.
+                            2. **Common Fraud Schemes**: 사례들에서 공통적으로 발견되는 회계부정/오류 수법 (구체적으로).
+                            3. **Key Audit Procedures**: 감사인이 이를 적발하기 위해 반드시 수행해야 할 감사절차(Checklist) 5가지.
+                            4. **Lesson Learned**: 결론 및 제언.
+
+                            * 톤앤매너: 전문적이고 논리적으로 작성할 것.
+                            * 중요 키워드는 굵게 표시할 것.
+                            """
+                            
+                            response = model.generate_content(prompt).text
+                            st.markdown(response)
+                            save_ai_log(f"통합리포트: {target_kwd}", response)
+                            
+                        except Exception as e:
+                            st.error(f"AI 분석 중 오류가 발생했습니다: {e}")
+            else:
+                st.warning("해당 키워드로 검색된 사례가 없습니다. 다른 단어로 시도해보세요.")
+
+    # [오른쪽] 기준서 챗봇 (기존 기능 유지)
+    with col_bot:
+        st.markdown("### 📘 기준서/감사기준 챗봇")
+        st.info("공부하다 궁금한 기준서 내용을 물어보세요.")
+        
+        std_type = st.radio("검색 대상", ["전체 통합", "K-IFRS (회계기준)", "KGAAS (감사기준)"])
+        use_google = st.toggle("Google 검색 연동", value=True, help="체크 시 최신 기준서를 구글링하여 답변합니다.")
+        
+        user_q = st.text_input("질문 입력", placeholder="예: 재고자산 실사 입회 생략 요건은?")
+        
+        if user_q:
+            with st.spinner("기준서를 찾아보는 중..."):
                 try:
-                    cases_txt = ""
-                    for i, r in sub.sort_values('결정연도', ascending=False).head(20).iterrows():
-                        cases_txt += f"- [{r['결정연도']}] {r['회사명']}: {r['지적사항요약']}\n"
-                    
+                    # 페르소나 설정
+                    if std_type == "K-IFRS (회계기준)":
+                        persona = "당신은 K-IFRS(한국채택국제회계기준) 전문 위원입니다."
+                        query_prefix = "K-IFRS"
+                    elif std_type == "KGAAS (감사기준)":
+                        persona = "당신은 회계감사기준(KGAAS) 전문 위원입니다."
+                        query_prefix = "회계감사기준"
+                    else:
+                        persona = "당신은 회계 및 감사기준 통합 전문가입니다."
+                        query_prefix = "K-IFRS 및 회계감사기준"
+
                     prompt = f"""
-                    당신은 회계법인 파트너입니다. '{target}' 이슈를 분석하세요.
-                    [사례] {cases_txt[:15000]}
-                    [목차] 1.발생원인 2.주요수법 3.체크리스트(5개)
+                    {persona}
+                    사용자 질문: {user_q}
+                    
+                    [답변 원칙]
+                    1. 반드시 **관련 기준서 번호(제1XXX호)**와 **문단 번호**를 명시하여 근거를 대세요.
+                    2. 블로그나 뇌피셜이 아닌, 기준서 원문에 입각하여 정확하게 설명하세요.
                     """
-                    res = genai.GenerativeModel(target_model).generate_content(prompt).text
+                    
+                    if use_google:
+                        # 도구 재설정 (검색용)
+                        search_model = genai.GenerativeModel(target_model, tools=[{"google_search": {}}])
+                        final_prompt = f"Google 검색 키워드: '{query_prefix} {user_q}'\n{prompt}"
+                        res = search_model.generate_content(final_prompt).text
+                    else:
+                        # 일반 생성
+                        res = model.generate_content(prompt).text
+                    
                     st.markdown(res)
-                    save_ai_log(f"{target} 리포트", res)
-                except Exception as e: st.error(f"오류: {e}")
-
-    with cs:
-        st.markdown("### 📘 기준서/감사기준 조회")
-        std_type = st.radio("검색 대상", ["전체", "K-IFRS", "KGAAS"])
-        use_g = st.toggle("Google 검색", value=True)
-        q = st.text_input("질문 입력")
-        
-        if q:
-            with st.spinner(f"{std_type} 검색 중..."):
-                try:
-                    if std_type == "K-IFRS":
-                        role = "K-IFRS 전문가"
-                        prefix = "K-IFRS"
-                    elif std_type == "KGAAS":
-                        role = "회계감사기준 전문가"
-                        prefix = "회계감사기준"
-                    else:
-                        role = "회계 및 감사 전문가"
-                        prefix = "K-IFRS 및 감사기준"
-
-                    strict_p = f"""
-                    당신은 {role}입니다. 질문: {q}
-                    [지침] 기준서/문단 번호 필수 명시. 원문 인용.
-                    """
+                    save_ai_log(f"챗봇({std_type}): {user_q}", res)
                     
-                    if use_g:
-                        tools = [{"google_search": {}}]
-                        m = genai.GenerativeModel(target_model, tools=tools)
-                        final_p = f"Google 검색: '{prefix} {q} 문단'\n{strict_p}"
-                    else:
-                        m = genai.GenerativeModel(target_model)
-                        final_p = strict_p
-                    
-                    r = m.generate_content(final_p, stream=False).text
-                    st.markdown(r)
-                    save_ai_log(f"챗봇({std_type}): {q}", r)
-                except Exception as e: st.error(f"오류: {e}")
+                except Exception as e:
+                    st.error(f"답변 생성 실패: {e}")
