@@ -170,27 +170,44 @@ with tab1:
                 st.info(f"**⚠️ 지적사항:** {row['지적사항요약']}")
                 st.warning(f"**💡 감사인 유의사항:** {row['감사인유의사항']}")
 
-            # 2. PDF 원본 뷰어 (핵심!)
+            # 2. PDF 원본 뷰어 (수정된 코드)
             st.markdown("---")
             st.subheader("📄 감리지적사례 원본(PDF)")
             
-            # 파일 경로 (GitHub의 'pdfs' 폴더 안)
+            # 파일 경로
             file_name = row.get('파일명', '')
             pdf_path = os.path.join("pdfs", str(file_name))
             
-            # 파일 존재 여부 확인 후 표시
             if os.path.exists(pdf_path) and str(file_name).lower().endswith('.pdf'):
                 # (1) PDF 파일 읽기
                 with open(pdf_path, "rb") as f:
                     base64_pdf = base64.b64encode(f.read()).decode('utf-8')
                 
-                # (2) Iframe으로 화면에 표시
-                pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700" type="application/pdf"></iframe>'
+                # (2) [수정] 다운로드 버튼을 먼저, 더 크게 보여줌 (가장 확실한 방법)
+                st.download_button(
+                    label="📥 PDF 원본 파일 다운로드 (미리보기가 안 보이면 클릭)",
+                    data=open(pdf_path, "rb"),
+                    file_name=file_name,
+                    mime="application/pdf",
+                    use_container_width=True  # 버튼을 꽉 차게 만들어서 강조
+                )
+
+                # (3) [수정] iframe 대신 embed 태그 사용 (호환성 개선)
+                # 일부 브라우저 차단 메시지 방지를 위한 안내 문구 추가
+                st.caption("※ 브라우저 보안 설정에 따라 미리보기가 차단될 수 있습니다. 위 다운로드 버튼을 이용해주세요.")
+                
+                pdf_display = f'''
+                    <embed 
+                        src="data:application/pdf;base64,{base64_pdf}" 
+                        width="100%" 
+                        height="800" 
+                        type="application/pdf"
+                    >
+                '''
                 st.markdown(pdf_display, unsafe_allow_html=True)
+                
             else:
                 st.error("⚠️ 원본 PDF 파일을 찾을 수 없습니다.")
-                st.caption(f"요청하신 파일명: {file_name}")
-                st.caption("※ 2025년 12월 최신 업데이트 데이터가 아직 서버에 반영되지 않았을 수 있습니다.")
 
 # ==============================================================================
 # [TAB 2] 키워드 기반 통합 분석 & 기준서 챗봇
@@ -300,3 +317,4 @@ with tab2:
                     
                 except Exception as e:
                     st.error(f"답변 생성 실패: {e}")
+
