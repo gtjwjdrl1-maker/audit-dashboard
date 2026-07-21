@@ -27,11 +27,7 @@ DB_FILE = "audit_database.db"
 genai.configure(api_key=MY_API_KEY)
 target_model = 'gemini-2.5-flash-lite' # 1,500회 무료 모델
 
-try:
-    tools = [{"google_search": {}}]
-    model = genai.GenerativeModel(target_model, tools=tools)
-except:
-    model = genai.GenerativeModel(target_model)
+model = genai.GenerativeModel(target_model)
 
 st.set_page_config(page_title="회계감리 AI 분석 시스템", layout="wide", page_icon="📊")
 
@@ -215,28 +211,17 @@ with tab2:
     # [오른쪽] 기준서 챗봇 (기존 코드 유지)
     with col_bot:
         st.markdown("### 📘 기준서 챗봇")
-        std_type = st.radio("검색 대상", ["전체", "K-IFRS", "KGAAS"])
-        use_google = st.toggle("Google 검색 연동", value=True)
-        
+
         with st.form(key='chat_form'):
             user_q = st.text_input("질문 입력", placeholder="예: 재고자산 실사")
             submit_button = st.form_submit_button(label='질문하기')
-        
+
         if submit_button and user_q:
             with st.spinner("답변 생성 중..."):
                 try:
-                    query_prefix = "K-IFRS 및 감사기준"
-                    if std_type == "K-IFRS": query_prefix = "K-IFRS"
-                    elif std_type == "KGAAS": query_prefix = "회계감사기준"
-
                     prompt = f"질문: {user_q}\n근거가 되는 기준서 문단 번호를 꼭 포함해서 설명해줘."
-                    
-                    if use_google:
-                        search_model = genai.GenerativeModel(target_model, tools=[{"google_search": {}}])
-                        res = search_model.generate_content(f"검색: '{query_prefix} {user_q}'\n{prompt}").text
-                    else:
-                        res = model.generate_content(prompt).text
-                    
+                    res = model.generate_content(prompt).text
+
                     st.markdown(res)
                     save_ai_log(f"챗봇: {user_q}", res)
                 except Exception as e: st.error(f"오류: {e}")
