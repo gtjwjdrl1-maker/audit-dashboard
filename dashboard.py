@@ -165,19 +165,19 @@ with tab2:
                             # 최대 15개까지만 참조 (토큰 절약 및 속도)
                             cases_summary = ""
                             ref_list = [] # UI에 보여줄 참조 목록
-                            
+
                             for i, r in target_df.head(15).iterrows():
                                 # [파일명] 회사명: 내용 형식으로 구성
                                 file_ref = r.get('파일명', '파일명미상')
                                 case_text = f"- [출처: {file_ref}] {r['회사명']} ({r['결정연도']}): {r['지적사항요약']}"
                                 cases_summary += case_text + "\n"
                                 ref_list.append(f"{r['회사명']} ({file_ref})")
-                            
+
                             # 2. 프롬프트 작성 (출처 표기 지시 강화)
                             prompt = f"""
                             당신은 회계법인 품질관리실 파트너입니다.
                             주제: **'{target_kwd}'** 관련 감리지적사례 종합 분석 리포트 작성.
-                            
+
                             [분석 대상 데이터 (Source Data)]
                             {cases_summary}
 
@@ -186,27 +186,34 @@ with tab2:
                             2. **Common Fraud Schemes**: 주요 회계부정/오류 수법 분석.
                             3. **Key Audit Procedures**: 감사인이 반드시 수행해야 할 절차 5가지.
                             4. **Reference**: 분석 내용 중간중간에 **(출처: FSS...pdf)** 형식으로 근거를 인용할 것.
-                            
+
                             * 톤앤매너: 전문가답게 논리적으로 작성.
                             """
-                            
+
                             # 3. AI 생성
                             response = model.generate_content(prompt).text
-                            
-                            # 4. 결과 출력
-                            st.markdown(response)
-                            
-                            # 5. [New] 하단에 '참고한 파일 목록' 별도 표시 (신뢰도 UP)
-                            with st.expander("📚 이 리포트가 참고한 원본 파일 목록 보기"):
-                                for ref in ref_list:
-                                    st.caption(f"• {ref}")
-                            
-                            # 로그 저장
+
+                            # 4. 결과를 세션에 저장 (다른 영역 재실행에도 유지되도록)
+                            st.session_state['ai_report_result'] = {
+                                'target_kwd': target_kwd,
+                                'response': response,
+                                'ref_list': ref_list,
+                            }
+
+                            # 5. 로그 저장
                             save_ai_log(f"리포트(RAG): {target_kwd}", response)
-                            
+
                         except Exception as e: st.error(f"오류: {e}")
             else:
                 st.warning("해당 키워드로 검색된 사례가 없습니다.")
+
+        # 세션에 저장된 마지막 리포트 결과를 항상 표시 (챗봇 실행으로 재실행되어도 유지)
+        report_result = st.session_state.get('ai_report_result')
+        if report_result:
+            st.markdown(report_result['response'])
+            with st.expander("📚 이 리포트가 참고한 원본 파일 목록 보기"):
+                for ref in report_result['ref_list']:
+                    st.caption(f"• {ref}")
 
     # [오른쪽] 기준서 챗봇 (기존 코드 유지)
     with col_bot:
@@ -222,6 +229,16 @@ with tab2:
                     prompt = f"질문: {user_q}\n근거가 되는 기준서 문단 번호를 꼭 포함해서 설명해줘."
                     res = model.generate_content(prompt).text
 
-                    st.markdown(res)
+                    # 결과를 세션에 저장 (다른 영역 재실행에도 유지되도록)
+                    st.session_state['chatbot_result'] = {
+                        'question': user_q,
+                        'answer': res,
+                    }
                     save_ai_log(f"챗봇: {user_q}", res)
                 except Exception as e: st.error(f"오류: {e}")
+
+        # 세션에 저장된 마지막 챗봇 결과를 항상 표시 (리포트 실행으로 재실행되어도 유지)
+        chatbot_result = st.session_state.get('chatbot_result')
+        if chatbot_result:
+            st.markdown(f"**Q. {chatbot_result['question']}**")
+            st.markdown(chatbot_result['answer'])
